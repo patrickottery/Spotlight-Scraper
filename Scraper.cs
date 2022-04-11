@@ -1,19 +1,23 @@
-﻿#region Main
+﻿#region Using
+using System.Security.Cryptography;
+using Newtonsoft.Json.Linq;
+#endregion
 
+#region Main
 Console.WriteLine("(*** Spotlight scraper beginning");
 var destinationFolder = args.Length == 0 ? @"C:\Temp\Spotlight Images\" : args[0];
 var destinationFolderFullPath = new DirectoryInfo(destinationFolder).FullName;
-Console.WriteLine("(*** Destination Folder: "+ destinationFolder);
+Console.WriteLine("(*** Destination Folder: "+ destinationFolderFullPath);
 CreateFolderIfNotExists(destinationFolderFullPath);
 var jsonMetaDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),  @"Packages\Microsoft.Windows.ContentDeliveryManager_cw5n1h2txyewy\LocalState\TargetedContentCache\v3\338387");
-var jsonMetaDataFiles = System.IO.Directory.GetFiles(jsonMetaDataFolder, "*.");
+var jsonMetaDataFiles = Directory.GetFiles(jsonMetaDataFolder, "*.");
 var spotlightImageInformation = GetSpotlightImageInformation(jsonMetaDataFiles);
 
 foreach (var item in spotlightImageInformation)
 {
     CopyFile(item);
 }
-Console.WriteLine("(*** Spotlight scraper finished");
+Console.WriteLine("*** Spotlight scraper finished");
 #endregion
 
 
@@ -27,8 +31,8 @@ List<SpotlightImageInformation> GetSpotlightImageInformation(string[] jsonMetaDa
         var json = GetJSONInfoFromFile(item);
         var description = json["items"][0]["properties"]["description"]["text"].ToString();
         var landscapeImageFullPath = json["properties"]["landscapeImage"]["image"].ToString();
-        var fileName = GetFilename(json["properties"]["landscapeImage"]["image"].ToString());
-        var destinationFileName = string.Format("{0} - {1}.jpg", fileName, SanitiseStringForFilename(description));
+        var fileName = GetFileNameWithoutExtension(json["properties"]["landscapeImage"]["image"].ToString());
+        var destinationFileName = GetDestinationFilename(description) ;
 
         list.Add(new SpotlightImageInformation
         {
@@ -40,35 +44,50 @@ List<SpotlightImageInformation> GetSpotlightImageInformation(string[] jsonMetaDa
     return list;
 }
 
-static string GetFilename(string fullFilePath)
+string GetDestinationFilename(string description)
+{
+    string invalidChars = System.Text.RegularExpressions.Regex.Escape(new string(System.IO.Path.GetInvalidFileNameChars()));
+    string invalidRegStr = string.Format(@"([{0}]*\.+$)|([{0}]+)", invalidChars);
+    description = System.Text.RegularExpressions.Regex.Replace(description, invalidRegStr, "_");
+    var fileName = string.Format("{0}.jpg", description);
+    return fileName;
+}
+
+static bool FilesAreEqual(FileInfo first, FileInfo second)
+{
+    byte[] firstHash = MD5.Create().ComputeHash(first.OpenRead());
+    byte[] secondHash = MD5.Create().ComputeHash(second.OpenRead());
+
+    for (int i=0; i<firstHash.Length; i++)
+    {
+        if (firstHash[i] != secondHash[i])
+            return false;
+    }
+    return true;
+}
+
+
+static string GetFileNameWithoutExtension(string fullFilePath)
 {
     return Path.GetFileNameWithoutExtension(new FileInfo(fullFilePath).FullName);
 }
 
-static string SanitiseStringForFilename(string input)
-{
-   string invalidChars = System.Text.RegularExpressions.Regex.Escape( new string( System.IO.Path.GetInvalidFileNameChars() ) );
-   string invalidRegStr = string.Format( @"([{0}]*\.+$)|([{0}]+)", invalidChars );
-
-   return System.Text.RegularExpressions.Regex.Replace(input, invalidRegStr, "_" );
-}
-
-static Newtonsoft.Json.Linq.JObject GetJSONInfoFromFile(string filename)
+static JObject GetJSONInfoFromFile(string filename)
 {
     string rawJson = File.ReadAllText(filename);
-    var json =  Newtonsoft.Json.Linq.JObject.Parse(rawJson);
+    var json =  JObject.Parse(rawJson);
     
     return json;
 }
 
 static void CreateFolderIfNotExists(string destinationFolderFullPath)
 {
-    if (!System.IO.Directory.Exists(destinationFolderFullPath))
+    if (!Directory.Exists(destinationFolderFullPath))
     {
         try
         {
             Console.WriteLine("Creating destination folder: " + destinationFolderFullPath);
-            System.IO.Directory.CreateDirectory(destinationFolderFullPath);
+            Directory.CreateDirectory(destinationFolderFullPath);
         }
         catch (Exception ex)
         {
@@ -79,16 +98,56 @@ static void CreateFolderIfNotExists(string destinationFolderFullPath)
 
 void CopyFile(SpotlightImageInformation item)
 {
-    var destinationFile = new FileInfo(destinationFolderFullPath + item.DestinationFileName);
-    if (destinationFile.Exists)
+    var destinationFileInfo = new FileInfo(destinationFolderFullPath + item.DestinationFileName);
+    var sourceFileInfo = new FileInfo(item.LandscapeImageFullPath);
+    var finished = false;
+    while (!finished)
     {
-        Console.WriteLine("File already exists: " + destinationFile.FullName);
+        try
+        {
+            destinationFileInfo = new FileInfo(destinationFolderFullPath + item.DestinationFileName); //to ensure updated name used
+            Console.WriteLine("Copying File: " + destinationFileInfo.FullName);
+            File.Copy(item.LandscapeImageFullPath, destinationFileInfo.FullName);
+            finished = true;
+        }
+        catch (IOException copyError)
+        {
+            Console.WriteLine("Copy Error: " + copyError.Message);
+            if (FilesAreEqual(sourceFileInfo, destinationFileInfo))
+            {
+                Console.WriteLine("File already exists and is identical.");
+                finished = true;
+            }
+            else
+            {
+                item.DestinationFileName = UpdateFileNameIfNeeded(item.DestinationFileName);
+            }
+        }
     }
-    else
+}
+
+string UpdateFileNameIfNeeded(string fileName)
+{
+    Console.WriteLine("Updating Filename: " + fileName);
+    var originalFilename = fileName;
+    var finished = false;
+    var counter = 0;
+    while (!finished)
     {
-        Console.WriteLine("Copying File: " + destinationFile.FullName);
-        File.Copy(item.LandscapeImageFullPath, destinationFile.FullName);
+        var destinationFileInfo = new FileInfo(destinationFolderFullPath + fileName);
+        if (!destinationFileInfo.Exists)
+        {
+            finished = true;
+        }
+        else
+        {
+            counter ++;
+            fileName = originalFilename.Replace(".jpg", string.Format(" {0}.jpg", counter.ToString()));
+        }
     }
+
+    Console.WriteLine("Updated filename: " + fileName);
+    return fileName;
 }
 
 #endregion
@@ -98,3 +157,4 @@ public class SpotlightImageInformation
     public string LandscapeImageFullPath { get; set; }
     public string DestinationFileName { get; set; }
 }
+
